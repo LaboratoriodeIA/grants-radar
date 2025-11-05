@@ -143,28 +143,37 @@ Deno.serve(async (req) => {
           .single();
 
         if (existing) {
-          // Update last_seen_at
-          await supabase
+          const { error: updateError } = await supabase
             .from('opportunities')
             .update({ last_seen_at: new Date().toISOString() })
             .eq('id', existing.id);
-          updatedCount++;
+          
+          if (updateError) {
+            console.error('Error updating FAPEMIG opportunity:', updateError);
+          } else {
+            updatedCount++;
+          }
         } else {
-          // Insert new opportunity
-          await supabase
+          const { error: insertError } = await supabase
             .from('opportunities')
             .insert({
               site: 'fapemig',
               name,
               url,
               deadline,
-              public: publico,
+              public_info: publico,
               locale: 'MG',
               category: categoria,
               description,
               fingerprint,
             });
-          newCount++;
+          
+          if (insertError) {
+            console.error('Error inserting FAPEMIG opportunity:', insertError);
+          } else {
+            console.log('Inserted new FAPEMIG opportunity:', name.substring(0, 100));
+            newCount++;
+          }
         }
       } catch (error) {
         console.error('Error processing opportunity:', error);

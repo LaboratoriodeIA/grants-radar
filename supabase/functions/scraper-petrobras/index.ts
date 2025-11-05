@@ -125,26 +125,37 @@ Deno.serve(async (req) => {
           .single();
 
         if (existing) {
-          await supabase
+          const { error: updateError } = await supabase
             .from('opportunities')
             .update({ last_seen_at: new Date().toISOString() })
             .eq('id', existing.id);
-          updatedCount++;
+          
+          if (updateError) {
+            console.error('Error updating Petrobras opportunity:', updateError);
+          } else {
+            updatedCount++;
+          }
         } else {
-          await supabase
+          const { error: insertError } = await supabase
             .from('opportunities')
             .insert({
               site: 'petrobras',
               name: opp.name,
               url: opp.url,
               deadline: opp.deadline,
-              public: null,
+              public_info: null,
               locale: 'BR',
               category: null,
               description: null,
               fingerprint,
             });
-          newCount++;
+          
+          if (insertError) {
+            console.error('Error inserting Petrobras opportunity:', insertError);
+          } else {
+            console.log('Inserted new Petrobras opportunity:', opp.name.substring(0, 100));
+            newCount++;
+          }
         }
       } catch (error) {
         console.error('Error processing opportunity:', error);
