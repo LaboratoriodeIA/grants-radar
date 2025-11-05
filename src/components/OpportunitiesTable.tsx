@@ -12,7 +12,7 @@ interface Opportunity {
   site: string;
   name: string;
   deadline: string | null;
-  public: string | null;
+  public_info: string | null;
   locale: string | null;
   url: string;
   description: string | null;
@@ -140,10 +140,10 @@ export function OpportunitiesTable({ searchQuery, siteFilter }: OpportunitiesTab
                   </div>
                 )}
 
-                {opportunity.public && (
+                {opportunity.public_info && (
                   <div className="flex items-center gap-1.5">
                     <Users className="w-4 h-4 text-primary" />
-                    <span className="line-clamp-1">{opportunity.public}</span>
+                    <span className="line-clamp-1">{opportunity.public_info}</span>
                   </div>
                 )}
               </div>

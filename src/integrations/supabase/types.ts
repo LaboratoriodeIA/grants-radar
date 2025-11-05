@@ -21,13 +21,14 @@ export type Database = {
           deadline: string | null
           description: string | null
           fingerprint: string
-          first_seen_at: string
           id: string
           last_seen_at: string
           locale: string | null
           name: string
-          public: string | null
-          site: Database["public"]["Enums"]["site_source"]
+          public_info: string | null
+          site: string
+          target_audience: string | null
+          updated_at: string
           url: string
         }
         Insert: {
@@ -36,13 +37,14 @@ export type Database = {
           deadline?: string | null
           description?: string | null
           fingerprint: string
-          first_seen_at?: string
           id?: string
           last_seen_at?: string
           locale?: string | null
           name: string
-          public?: string | null
-          site: Database["public"]["Enums"]["site_source"]
+          public_info?: string | null
+          site: string
+          target_audience?: string | null
+          updated_at?: string
           url: string
         }
         Update: {
@@ -51,13 +53,14 @@ export type Database = {
           deadline?: string | null
           description?: string | null
           fingerprint?: string
-          first_seen_at?: string
           id?: string
           last_seen_at?: string
           locale?: string | null
           name?: string
-          public?: string | null
-          site?: Database["public"]["Enums"]["site_source"]
+          public_info?: string | null
+          site?: string
+          target_audience?: string | null
+          updated_at?: string
           url?: string
         }
         Relationships: []
@@ -70,7 +73,7 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      site_source: "fapemig" | "finep" | "petrobras"
+      [_ in never]: never
     }
     CompositeTypes: {
       [_ in never]: never
@@ -197,8 +200,6 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {
-      site_source: ["fapemig", "finep", "petrobras"],
-    },
+    Enums: {},
   },
 } as const
