@@ -6,6 +6,45 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+const userAgents = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+];
+
+function getUserAgent(): string {
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
+async function fetchWithRetry(url: string, maxRetries = 3): Promise<Response> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': getUserAgent(),
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        },
+        signal: AbortSignal.timeout(30000),
+      });
+      
+      if (response.ok) return response;
+      
+      console.warn(`Attempt ${i + 1}/${maxRetries}: Status ${response.status}`);
+    } catch (error) {
+      console.error(`Attempt ${i + 1}/${maxRetries} failed:`, error);
+    }
+    
+    if (i < maxRetries - 1) {
+      const delay = Math.pow(2, i + 1) * 1000;
+      console.log(`Waiting ${delay}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw new Error(`Failed to fetch ${url} after ${maxRetries} attempts`);
+}
+
 async function makeFingerprint(site: string, name: string, url: string, deadline: string | null): Promise<string> {
   const raw = `${site}|${name.trim()}|${url}|${deadline || ''}`;
   const encoder = new TextEncoder();
@@ -17,12 +56,37 @@ async function makeFingerprint(site: string, name: string, url: string, deadline
 }
 
 function parseDate(text: string): string | null {
-  const dateRegex = /(\d{2})\/(\d{2})\/(\d{4})/;
-  const match = text.match(dateRegex);
-  if (match) {
-    return `${match[3]}-${match[2]}-${match[1]}`;
+  const patterns = [
+    /(\d{2})\/(\d{2})\/(\d{4})/,
+    /até\s+(\d{2})\/(\d{2})\/(\d{4})/i,
+    /prazo[:\s]+(\d{2})\/(\d{2})\/(\d{4})/i,
+    /encerramento[:\s]+(\d{2})\/(\d{2})\/(\d{4})/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const groups = match.slice(1).filter(Boolean);
+      if (groups.length === 3) {
+        return `${groups[2]}-${groups[1]}-${groups[0]}`;
+      }
+    }
   }
   return null;
+}
+
+function validateOpportunity(opp: any): boolean {
+  if (!opp.name || opp.name.length < 5) {
+    console.warn('Invalid name:', opp.name);
+    return false;
+  }
+  
+  if (!opp.url || !opp.url.startsWith('http')) {
+    console.warn('Invalid URL:', opp.url);
+    return false;
+  }
+  
+  return true;
 }
 
 Deno.serve(async (req) => {
@@ -30,81 +94,119 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const startTime = Date.now();
+
   try {
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    console.log('Starting FINEP scraper...');
+    console.log('=== INÍCIO DO SCRAPER FINEP ===');
+    console.log('Timestamp:', new Date().toISOString());
 
-    const URL = 'https://www.finep.gov.br/chamadas-publicas';
+    const URL = 'http://www.finep.gov.br/chamadas-publicas?situacao=aberta';
+    console.log('URL:', URL);
     
-    const response = await fetch(URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; EditaisBot/1.0)',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`FINEP returned ${response.status}`);
-    }
+    console.log('\n--- FETCH ---');
+    const response = await fetchWithRetry(URL);
+    console.log('Status:', response.status);
 
     const html = await response.text();
+    console.log('HTML size:', Math.round(html.length / 1024), 'KB');
+    console.log('HTML preview:', html.substring(0, 300));
+    
     const doc = new DOMParser().parseFromString(html, 'text/html');
     
     if (!doc) {
       throw new Error('Failed to parse HTML');
     }
 
-    // Find opportunity cards - FINEP uses various selectors depending on their CMS
+    console.log('\n--- PARSING ---');
+    
     const selectors = [
+      'form h3 a',
+      'form div h3',
+      'form .chamada-item',
       '.chamada-item',
       '.edital-item',
       'article.chamada',
       '.card.chamada',
       'article[class*="chamada"]',
       '.entry-content article',
+      'h3 a',
+      'h2 a',
     ];
 
     let cards: any[] = [];
     for (const selector of selectors) {
+      console.log(`Testing selector: ${selector}`);
       const elements = doc.querySelectorAll(selector);
+      console.log(`Found ${elements.length} elements`);
+      
       if (elements.length > 0) {
         cards = Array.from(elements);
-        console.log(`Found ${cards.length} cards with selector: ${selector}`);
+        console.log(`✓ Using selector: ${selector} (${cards.length} elements)`);
         break;
       }
     }
 
-    console.log(`Found ${cards.length} opportunities from FINEP`);
+    console.log(`\n--- PROCESSING ${cards.length} OPPORTUNITIES ---`);
 
     let newCount = 0;
     let updatedCount = 0;
+    let errorCount = 0;
 
     for (const card of cards) {
       try {
-        const titleElement = card.querySelector('h1, h2, h3, h4, .title, .chamada-titulo');
-        const linkElement = card.querySelector('a');
-        
-        if (!titleElement || !linkElement) continue;
+        let name = '';
+        let href = '';
+        let deadline: string | null = null;
 
-        const name = titleElement.textContent.trim().substring(0, 600);
-        const href = linkElement.getAttribute('href') || '';
-        const url = href.startsWith('http') ? href : `https://www.finep.gov.br${href}`;
+        if (card.tagName === 'A') {
+          name = card.textContent.trim();
+          href = card.getAttribute('href') || '';
+          const parentText = card.parentElement?.parentElement?.textContent || '';
+          deadline = parseDate(parentText);
+        } else {
+          const titleElement = card.querySelector('h1, h2, h3, h4, .title, .chamada-titulo');
+          const linkElement = card.querySelector('a');
+          
+          if (!titleElement || !linkElement) {
+            console.warn('Missing title or link element in card');
+            continue;
+          }
 
-        if (!name || !url) continue;
+          name = titleElement.textContent.trim().substring(0, 600);
+          href = linkElement.getAttribute('href') || '';
+          const cardText = card.textContent;
+          deadline = parseDate(cardText);
+        }
 
-        const cardText = card.textContent;
-        const deadline = parseDate(cardText);
+        const url = href.startsWith('http') ? href : `http://www.finep.gov.br${href}`;
+
+        if (!validateOpportunity({ name, url })) {
+          errorCount++;
+          continue;
+        }
+
+        console.log(`Processing: ${name.substring(0, 80)}...`);
+        console.log(`URL: ${url}`);
+        console.log(`Deadline: ${deadline || 'N/A'}`);
 
         const fingerprint = await makeFingerprint('finep', name, url, deadline);
 
-        const { data: existing } = await supabase
+        const { data: existing, error: selectError } = await supabase
           .from('opportunities')
           .select('id')
           .eq('fingerprint', fingerprint)
-          .single();
+          .maybeSingle();
+
+        if (selectError) {
+          console.error('Error checking existing opportunity:', selectError);
+          errorCount++;
+          continue;
+        }
 
         if (existing) {
           const { error: updateError } = await supabase
@@ -114,6 +216,7 @@ Deno.serve(async (req) => {
           
           if (updateError) {
             console.error('Error updating FINEP opportunity:', updateError);
+            errorCount++;
           } else {
             updatedCount++;
           }
@@ -134,15 +237,19 @@ Deno.serve(async (req) => {
           
           if (insertError) {
             console.error('Error inserting FINEP opportunity:', insertError);
+            errorCount++;
           } else {
-            console.log('Inserted new FINEP opportunity:', name.substring(0, 100));
+            console.log('✓ Inserted:', name.substring(0, 60));
             newCount++;
           }
         }
       } catch (error) {
         console.error('Error processing FINEP opportunity:', error);
+        errorCount++;
       }
     }
+
+    const executionTime = Date.now() - startTime;
 
     const result = {
       success: true,
@@ -150,10 +257,18 @@ Deno.serve(async (req) => {
       total: cards.length,
       new: newCount,
       updated: updatedCount,
+      skipped: cards.length - newCount - updatedCount,
+      errors: errorCount,
+      execution_time_ms: executionTime,
       timestamp: new Date().toISOString(),
     };
 
-    console.log('FINEP scraper completed:', result);
+    console.log('\n=== RESULTADO FINEP ===');
+    console.log('Total encontrado:', result.total);
+    console.log('Novos:', result.new);
+    console.log('Atualizados:', result.updated);
+    console.log('Erros:', result.errors);
+    console.log('Tempo de execução:', executionTime, 'ms');
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -165,6 +280,7 @@ Deno.serve(async (req) => {
       success: false, 
       error: error instanceof Error ? error.message : String(error),
       source: 'finep',
+      execution_time_ms: Date.now() - startTime,
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
