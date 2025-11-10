@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
+import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.45/deno-dom-wasm.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -113,74 +114,78 @@ Deno.serve(async (req) => {
     
     let opportunities: FapemigOpportunity[] = [];
     
-    // Try to extract JSON data from the page
-    const jsonMatch = html.match(/__NUXT_DATA__\s*=\s*(\[.*?\]);/s) || 
-                      html.match(/window\.__NUXT__\s*=\s*({.*?});/s);
+    // Parse HTML with DOMParser
+    const doc = new DOMParser().parseFromString(html, 'text/html');
     
-    if (jsonMatch) {
-      console.log('Found embedded JSON data');
-      console.log('JSON preview:', jsonMatch[1].substring(0, 200));
-      
-      try {
-        const jsonData = JSON.parse(jsonMatch[1]);
-        opportunities = Array.isArray(jsonData) ? jsonData : 
-                       jsonData.data?.items || jsonData.items || [];
-        console.log(`Extracted ${opportunities.length} opportunities from JSON`);
-      } catch (e) {
-        console.error('Failed to parse embedded JSON:', e);
-      }
+    if (!doc) {
+      throw new Error('Failed to parse HTML');
     }
 
-    // Fallback: scrape HTML if JSON extraction failed
-    if (opportunities.length === 0) {
-      console.log('No JSON found, using HTML scraping...');
-      
-      const cardRegex = /<article[^>]*class="[^"]*(?:chamada|edital|card|opportunity)[^"]*"[^>]*>(.*?)<\/article>/gs;
-      const divCardRegex = /<div[^>]*class="[^"]*(?:chamada|edital|card|opportunity)[^"]*"[^>]*>(.*?)<\/div>/gs;
-      const titleRegex = /<h[1-4][^>]*>(.*?)<\/h[1-4]>/s;
-      const linkRegex = /<a[^>]*href="([^"]+)"/s;
-      const dateRegex = /(\d{2}\/\d{2}\/\d{4})/;
-      
-      let match;
-      let foundCount = 0;
-      
-      // Try article tags first
-      while ((match = cardRegex.exec(html)) !== null) {
-        const cardHtml = match[1];
-        const titleMatch = titleRegex.exec(cardHtml);
-        const linkMatch = linkRegex.exec(cardHtml);
-        const dateMatch = dateRegex.exec(cardHtml);
-        
-        if (titleMatch && linkMatch) {
-          opportunities.push({
-            titulo: titleMatch[1].replace(/<[^>]*>/g, '').trim(),
-            url: linkMatch[1],
-            fim_date: dateMatch ? dateMatch[1] : undefined,
-          });
-          foundCount++;
+    console.log('DOM parsed successfully');
+    
+    // Look for all links that point to individual opportunities
+    const links = Array.from(doc.querySelectorAll('a[href*="/oportunidades/chamadas-e-editais/"]'));
+    console.log(`Found ${links.length} opportunity links`);
+    
+    for (const linkNode of links) {
+      try {
+        const link = linkNode as any; // Cast to Element type
+        const href = link.getAttribute('href');
+        if (!href || href.includes('?') || href.endsWith('/chamadas-e-editais')) {
+          continue; // Skip filter links and the main page link
         }
-      }
-      
-      console.log(`Found ${foundCount} opportunities in <article> tags`);
-      
-      // Try div tags if nothing found
-      if (opportunities.length === 0) {
-        while ((match = divCardRegex.exec(html)) !== null) {
-          const cardHtml = match[1];
-          const titleMatch = titleRegex.exec(cardHtml);
-          const linkMatch = linkRegex.exec(cardHtml);
-          const dateMatch = dateRegex.exec(cardHtml);
-          
-          if (titleMatch && linkMatch) {
-            opportunities.push({
-              titulo: titleMatch[1].replace(/<[^>]*>/g, '').trim(),
-              url: linkMatch[1],
-              fim_date: dateMatch ? dateMatch[1] : undefined,
-            });
-            foundCount++;
+        
+        // Find the parent card/article containing this link
+        let card = link.closest('article, section, div[class*="card"]');
+        if (!card) {
+          // Try to get the parent element up to 5 levels
+          let parent = link.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            const className = parent.getAttribute?.('class') || '';
+            if (className.includes('card') || className.includes('item') || parent.tagName === 'ARTICLE') {
+              card = parent;
+              break;
+            }
+            parent = parent.parentElement;
           }
         }
-        console.log(`Found ${foundCount} opportunities in <div> tags`);
+        
+        if (!card) continue;
+        
+        const cardText = card.textContent || '';
+        
+        // Extract title - look for h1-h6 in the card
+        const titleElement = card.querySelector('h1, h2, h3, h4, h5, h6');
+        const titulo = titleElement ? titleElement.textContent?.trim() : link.textContent?.trim();
+        
+        if (!titulo || titulo.length < 10) continue;
+        
+        // Extract deadline - look for date patterns
+        let fim_date: string | undefined;
+        const datePatterns = [
+          /Submissão até[:\s]*(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/i,
+          /até[:\s]*(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/i,
+          /(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/,
+          /(\d{2}\/\d{2}\/\d{4})/,
+        ];
+        
+        for (const pattern of datePatterns) {
+          const match = cardText.match(pattern);
+          if (match) {
+            fim_date = match[1];
+            break;
+          }
+        }
+        
+        opportunities.push({
+          titulo: titulo.substring(0, 600),
+          url: href,
+          fim_date,
+        });
+        
+        console.log(`Found: ${titulo.substring(0, 60)}...`);
+      } catch (error) {
+        console.error('Error processing link:', error);
       }
     }
 
@@ -219,13 +224,31 @@ Deno.serve(async (req) => {
         // Parse deadline
         let deadline: string | null = null;
         if (item.fim_date) {
-          const dateOnly = item.fim_date.split(' ')[0];
-          const parts = dateOnly.split(/[\/\-]/);
-          if (parts.length === 3) {
-            if (parts[0].length === 4) {
-              deadline = dateOnly;
-            } else {
-              deadline = `${parts[2]}-${parts[1]}-${parts[0]}`;
+          // Handle Brazilian date formats like "25 de nov. de 2025"
+          const monthMap: Record<string, string> = {
+            'jan': '01', 'fev': '02', 'mar': '03', 'abr': '04',
+            'mai': '05', 'jun': '06', 'jul': '07', 'ago': '08',
+            'set': '09', 'out': '10', 'nov': '11', 'dez': '12',
+          };
+          
+          // Try format: "DD de MMM de YYYY"
+          const brDateMatch = item.fim_date.match(/(\d{1,2})\s+de\s+(\w+)\.?\s+de\s+(\d{4})/i);
+          if (brDateMatch) {
+            const day = brDateMatch[1].padStart(2, '0');
+            const monthAbbr = brDateMatch[2].toLowerCase().substring(0, 3);
+            const month = monthMap[monthAbbr] || '01';
+            const year = brDateMatch[3];
+            deadline = `${year}-${month}-${day}`;
+          } else {
+            // Try format: DD/MM/YYYY
+            const dateOnly = item.fim_date.split(' ')[0];
+            const parts = dateOnly.split(/[\/\-]/);
+            if (parts.length === 3) {
+              if (parts[0].length === 4) {
+                deadline = dateOnly;
+              } else {
+                deadline = `${parts[2]}-${parts[1]}-${parts[0]}`;
+              }
             }
           }
         }
