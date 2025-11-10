@@ -1,1 +1,13 @@
 project_id = "toqujpiqddzxvuxilhoh"
+
+[functions.scraper-fapemig]
+verify_jwt = false
+
+[functions.scraper-finep]
+verify_jwt = false
+
+[functions.scraper-petrobras]
+verify_jwt = false
+
+[functions.scraper-all]
+verify_jwt = false
