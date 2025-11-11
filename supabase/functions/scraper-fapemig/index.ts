@@ -1,5 +1,4 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
-import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.45/deno-dom-wasm.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -22,7 +21,7 @@ async function fetchWithRetry(url: string, maxRetries = 3): Promise<Response> {
       const response = await fetch(url, {
         headers: {
           'User-Agent': getUserAgent(),
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept': 'application/json',
           'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
         },
         signal: AbortSignal.timeout(30000),
@@ -45,18 +44,44 @@ async function fetchWithRetry(url: string, maxRetries = 3): Promise<Response> {
   throw new Error(`Failed to fetch ${url} after ${maxRetries} attempts`);
 }
 
-interface FapemigOpportunity {
-  titulo?: string;
-  title?: string;
-  url?: string;
-  link?: string;
-  fim_date?: string;
-  publico_alvo?: string[];
-  publico?: string[];
-  linhas_fomento?: string;
-  categoria?: string;
-  description?: string;
-  anexos?: Array<{ url?: string }>;
+interface FapemigApiCall {
+  id: number;
+  title: string;
+  fields: {
+    numero?: string;
+    titulo?: string;
+    status?: string;
+    ativo?: string;
+    valor?: string;
+    descricao_chamada?: string;
+    quem_pode_participar?: string;
+    o_que_pode_ser_financiado?: string;
+    requisitos_submissao?: string;
+    criterios_avaliacao?: string;
+    areas_conhecimento?: string[];
+    linhas_fomento?: string[];
+    publico_alvo?: string[];
+    submissao?: Array<{
+      description?: string;
+      inicio_date?: string;
+      fim_date?: string;
+    }>;
+    divulgacao?: Array<{
+      description?: string;
+      inicio_date?: string;
+      fim_date?: string;
+      resultado_final?: boolean;
+    }>;
+    anexos?: Array<{
+      anexo_id: number | string;
+      url: string;
+      filename: string;
+    }>;
+  };
+}
+
+interface FapemigApiResponse {
+  data: FapemigApiCall[];
 }
 
 async function makeFingerprint(site: string, name: string, url: string, deadline: string | null): Promise<string> {
@@ -83,6 +108,82 @@ function validateOpportunity(opp: any): boolean {
   return true;
 }
 
+function validateDeadline(deadline: string | null): string | null {
+  if (!deadline) return null;
+  
+  // API já retorna datas em formato ISO (YYYY-MM-DD)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
+    return deadline;
+  }
+  
+  console.warn('Unexpected deadline format:', deadline);
+  return null;
+}
+
+function mapApiCallToOpportunity(apiCall: FapemigApiCall) {
+  const fields = apiCall.fields;
+  
+  // Construct URL da página web
+  const url = `https://fapemig.br/oportunidades/chamadas-e-editais/${apiCall.id}`;
+  
+  // Extract deadline from submissao array (fim_date)
+  let deadline: string | null = null;
+  if (fields.submissao && fields.submissao.length > 0) {
+    const submissao = fields.submissao[0];
+    deadline = validateDeadline(submissao.fim_date || null);
+  }
+  
+  // Build category from linhas_fomento + areas_conhecimento
+  const categoryParts: string[] = [];
+  if (fields.linhas_fomento && fields.linhas_fomento.length > 0) {
+    categoryParts.push(fields.linhas_fomento.join(', '));
+  }
+  if (fields.areas_conhecimento && fields.areas_conhecimento.length > 0) {
+    categoryParts.push(fields.areas_conhecimento.slice(0, 3).join(', '));
+  }
+  const category = categoryParts.length > 0 
+    ? categoryParts.join(' | ').substring(0, 255) 
+    : null;
+  
+  // Build target_audience from publico_alvo
+  const target_audience = fields.publico_alvo && fields.publico_alvo.length > 0
+    ? fields.publico_alvo.join(', ')
+    : null;
+  
+  // Build description from multiple fields
+  const descriptionParts: string[] = [];
+  if (fields.descricao_chamada) {
+    descriptionParts.push(`**Descrição:** ${fields.descricao_chamada}`);
+  }
+  if (fields.quem_pode_participar) {
+    descriptionParts.push(`**Quem pode participar:** ${fields.quem_pode_participar}`);
+  }
+  if (fields.o_que_pode_ser_financiado) {
+    descriptionParts.push(`**O que pode ser financiado:** ${fields.o_que_pode_ser_financiado}`);
+  }
+  if (fields.valor) {
+    descriptionParts.push(`**Valor:** R$ ${fields.valor}`);
+  }
+  const description = descriptionParts.length > 0
+    ? descriptionParts.join('\n\n').substring(0, 2000)
+    : null;
+  
+  // Use titulo from fields or title
+  const name = (fields.titulo || apiCall.title || '').substring(0, 600).trim();
+  
+  return {
+    site: 'fapemig',
+    name,
+    url,
+    deadline,
+    category,
+    description,
+    target_audience,
+    locale: 'MG',
+    public_info: null,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -96,172 +197,63 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    console.log('=== INÍCIO DO SCRAPER FAPEMIG ===');
+    console.log('=== FAPEMIG SCRAPER - API MODE ===');
     console.log('Timestamp:', new Date().toISOString());
 
-    const API_URL = 'https://fapemig.br/oportunidades/chamadas-e-editais?status=abertas';
-    console.log('URL:', API_URL);
+    const API_URL = 'https://fapemig.br/api/calls';
+    console.log('API URL:', API_URL);
     
-    console.log('\n--- FETCH ---');
+    console.log('\n--- API REQUEST ---');
     const response = await fetchWithRetry(API_URL);
-    console.log('Status:', response.status);
+    console.log('API Status:', response.status);
+    console.log('Content-Type:', response.headers.get('content-type'));
 
-    const html = await response.text();
-    console.log('HTML size:', Math.round(html.length / 1024), 'KB');
-    console.log('HTML preview:', html.substring(0, 300));
+    if (!response.ok) {
+      throw new Error(`API returned status ${response.status}: ${response.statusText}`);
+    }
     
-    console.log('\n--- PARSING ---');
-    
-    let opportunities: FapemigOpportunity[] = [];
-    
-    // Parse HTML with DOMParser
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    
-    if (!doc) {
-      throw new Error('Failed to parse HTML');
+    const contentType = response.headers.get('content-type');
+    if (!contentType?.includes('application/json')) {
+      console.error('Unexpected content-type:', contentType);
+      const text = await response.text();
+      console.error('Response preview:', text.substring(0, 500));
+      throw new Error(`Expected JSON but got ${contentType}`);
     }
 
-    console.log('DOM parsed successfully');
+    console.log('\n--- API RESPONSE ---');
+    const apiResponse: FapemigApiResponse = await response.json();
+    console.log('Total calls in API:', apiResponse.data.length);
     
-    // Look for all links that point to individual opportunities
-    const links = Array.from(doc.querySelectorAll('a[href*="/oportunidades/chamadas-e-editais/"]'));
-    console.log(`Found ${links.length} opportunity links`);
+    console.log('\n--- FILTERING ---');
+    const openCalls = apiResponse.data.filter(call => {
+      const status = call.fields.status?.toLowerCase() || '';
+      const ativo = call.fields.ativo?.toLowerCase() || '';
+      return (status === 'abertas') && (ativo === 'sim');
+    });
+    console.log('Open calls found:', openCalls.length);
     
-    for (const linkNode of links) {
-      try {
-        const link = linkNode as any; // Cast to Element type
-        const href = link.getAttribute('href');
-        if (!href || href.includes('?') || href.endsWith('/chamadas-e-editais')) {
-          continue; // Skip filter links and the main page link
-        }
-        
-        // Find the parent card/article containing this link
-        let card = link.closest('article, section, div[class*="card"]');
-        if (!card) {
-          // Try to get the parent element up to 5 levels
-          let parent = link.parentElement;
-          for (let i = 0; i < 5 && parent; i++) {
-            const className = parent.getAttribute?.('class') || '';
-            if (className.includes('card') || className.includes('item') || parent.tagName === 'ARTICLE') {
-              card = parent;
-              break;
-            }
-            parent = parent.parentElement;
-          }
-        }
-        
-        if (!card) continue;
-        
-        const cardText = card.textContent || '';
-        
-        // Extract title - look for h1-h6 in the card
-        const titleElement = card.querySelector('h1, h2, h3, h4, h5, h6');
-        const titulo = titleElement ? titleElement.textContent?.trim() : link.textContent?.trim();
-        
-        if (!titulo || titulo.length < 10) continue;
-        
-        // Extract deadline - look for date patterns
-        let fim_date: string | undefined;
-        const datePatterns = [
-          /Submissão até[:\s]*(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/i,
-          /até[:\s]*(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/i,
-          /(\d{1,2}\s+de\s+\w+\.?\s+de\s+\d{4})/,
-          /(\d{2}\/\d{2}\/\d{4})/,
-        ];
-        
-        for (const pattern of datePatterns) {
-          const match = cardText.match(pattern);
-          if (match) {
-            fim_date = match[1];
-            break;
-          }
-        }
-        
-        opportunities.push({
-          titulo: titulo.substring(0, 600),
-          url: href,
-          fim_date,
-        });
-        
-        console.log(`Found: ${titulo.substring(0, 60)}...`);
-      } catch (error) {
-        console.error('Error processing link:', error);
-      }
-    }
+    console.log('\n--- MAPPING ---');
+    const opportunities = openCalls.map(mapApiCallToOpportunity);
+    console.log('Valid opportunities:', opportunities.length);
 
-    console.log(`\n--- PROCESSING ${opportunities.length} OPPORTUNITIES ---`);
-
+    console.log('\n--- DATABASE OPERATIONS ---');
     let newCount = 0;
     let updatedCount = 0;
     let errorCount = 0;
 
-    for (const item of opportunities) {
+    for (const opp of opportunities) {
       try {
-        const name = (item.titulo || item.title || '').substring(0, 600).trim();
-        if (!name) {
-          console.warn('Skipping opportunity with no name');
-          continue;
-        }
-
-        let url = item.url || item.link || item.anexos?.[0]?.url || '';
-        if (!url) {
-          console.warn('Skipping opportunity with no URL');
-          continue;
-        }
-
-        // Normalize URL
-        url = url.startsWith('http') 
-          ? url 
-          : url.startsWith('/') 
-            ? `https://fapemig.br${url}`
-            : `https://fapemig.br/oportunidades/${url}`;
-
-        if (!validateOpportunity({ name, url })) {
+        if (!validateOpportunity(opp)) {
           errorCount++;
           continue;
         }
 
-        // Parse deadline
-        let deadline: string | null = null;
-        if (item.fim_date) {
-          // Handle Brazilian date formats like "25 de nov. de 2025"
-          const monthMap: Record<string, string> = {
-            'jan': '01', 'fev': '02', 'mar': '03', 'abr': '04',
-            'mai': '05', 'jun': '06', 'jul': '07', 'ago': '08',
-            'set': '09', 'out': '10', 'nov': '11', 'dez': '12',
-          };
-          
-          // Try format: "DD de MMM de YYYY"
-          const brDateMatch = item.fim_date.match(/(\d{1,2})\s+de\s+(\w+)\.?\s+de\s+(\d{4})/i);
-          if (brDateMatch) {
-            const day = brDateMatch[1].padStart(2, '0');
-            const monthAbbr = brDateMatch[2].toLowerCase().substring(0, 3);
-            const month = monthMap[monthAbbr] || '01';
-            const year = brDateMatch[3];
-            deadline = `${year}-${month}-${day}`;
-          } else {
-            // Try format: DD/MM/YYYY
-            const dateOnly = item.fim_date.split(' ')[0];
-            const parts = dateOnly.split(/[\/\-]/);
-            if (parts.length === 3) {
-              if (parts[0].length === 4) {
-                deadline = dateOnly;
-              } else {
-                deadline = `${parts[2]}-${parts[1]}-${parts[0]}`;
-              }
-            }
-          }
-        }
-
-        const publico = (item.publico_alvo || item.publico || []).join(', ') || null;
-        const categoria = item.linhas_fomento || item.categoria || null;
-        const description = item.description || null;
-
-        console.log(`Processing: ${name.substring(0, 60)}...`);
-        console.log(`URL: ${url}`);
-        console.log(`Deadline: ${deadline || 'N/A'}`);
-
-        const fingerprint = await makeFingerprint('fapemig', name, url, deadline);
+        const fingerprint = await makeFingerprint(
+          opp.site, 
+          opp.name, 
+          opp.url, 
+          opp.deadline
+        );
 
         const { data: existing, error: selectError } = await supabase
           .from('opportunities')
@@ -282,7 +274,7 @@ Deno.serve(async (req) => {
             .eq('id', existing.id);
           
           if (updateError) {
-            console.error('Error updating FAPEMIG opportunity:', updateError);
+            console.error('Error updating opportunity:', updateError);
             errorCount++;
           } else {
             updatedCount++;
@@ -291,22 +283,15 @@ Deno.serve(async (req) => {
           const { error: insertError } = await supabase
             .from('opportunities')
             .insert({
-              site: 'fapemig',
-              name,
-              url,
-              deadline,
-              public_info: publico,
-              locale: 'MG',
-              category: categoria,
-              description,
+              ...opp,
               fingerprint,
             });
           
           if (insertError) {
-            console.error('Error inserting FAPEMIG opportunity:', insertError);
+            console.error('Error inserting opportunity:', insertError);
             errorCount++;
           } else {
-            console.log('✓ Inserted:', name.substring(0, 60));
+            console.log('✓ Inserted:', opp.name.substring(0, 60));
             newCount++;
           }
         }
@@ -324,7 +309,6 @@ Deno.serve(async (req) => {
       total: opportunities.length,
       new: newCount,
       updated: updatedCount,
-      skipped: opportunities.length - newCount - updatedCount,
       errors: errorCount,
       execution_time_ms: executionTime,
       timestamp: new Date().toISOString(),
